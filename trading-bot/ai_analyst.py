@@ -42,11 +42,15 @@ GROQ_MODELS = [
 
 # Fallback provider when Groq is rate limited — OpenRouter's free-tier models.
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+# OpenRouter's free-tier catalog changes over time and slugs get deprecated —
+# keep several candidates and fall through on 400/404 ("model unavailable"),
+# not just 429, since a stale/renamed slug returns 404 too.
 OPENROUTER_MODELS = [
-    os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free"),
-    "deepseek/deepseek-chat-v3-0324:free",
-    "qwen/qwen-2.5-72b-instruct:free",
-    "google/gemini-2.0-flash-exp:free",
+    os.environ.get("OPENROUTER_MODEL", "openai/gpt-oss-20b:free"),
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "nousresearch/hermes-3-llama-3.1-405b:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "meta-llama/llama-3.2-3b-instruct:free",
 ]
 
 PROSPECT_SYSTEM_PROMPT = """You are a professional discretionary crypto trader with 15 years of \
@@ -337,20 +341,34 @@ class AIAnalyst:
                     json={
                         "model": model,
                         "temperature": 0.2,
-                        "max_tokens": 600,
+                        # Free-tier models on OpenRouter are often reasoning
+                        # models that otherwise burn the whole token budget on
+                        # hidden "reasoning" before ever writing the JSON
+                        # answer — cap reasoning effort so content comes back.
+                        "max_tokens": 1200,
+                        "reasoning": {"effort": "low"},
                         "response_format": {"type": "json_object"},
                         "messages": [
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": payload_text},
                         ],
                     },
-                    timeout=45,
+                    timeout=60,
                 )
                 if resp.status_code == 200:
-                    self._or_model = model
                     body = resp.json()
-                    return model, body["choices"][0]["message"]["content"]
-                if resp.status_code in (400, 404) and "model" in resp.text.lower():
+                    content = (body.get("choices") or [{}])[0].get("message", {}).get("content")
+                    if not content:
+                        # Reasoning ate the whole token budget, or the model
+                        # ignored response_format — try the next candidate.
+                        last_exc = RuntimeError(f"{model}: empty content (finish_reason="
+                                                 f"{(body.get('choices') or [{}])[0].get('finish_reason')})")
+                        continue
+                    self._or_model = model
+                    return model, content
+                if resp.status_code in (400, 404):
+                    # Model slug unavailable/renamed/deprecated on OpenRouter's
+                    # free tier — try the next candidate instead of giving up.
                     last_exc = RuntimeError(f"{model}: {resp.status_code} {resp.text[:120]}")
                     continue
                 if resp.status_code == 429:
