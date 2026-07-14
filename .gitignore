@@ -47,3 +47,11 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pythonlibs/
+trading-bot/signals.json
+trading-bot/trade_state.json
