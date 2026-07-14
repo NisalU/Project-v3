@@ -18,4 +18,13 @@ system would fight the scaffolds rather than help.
 - Requires the `GROQ_API_KEY` secret for the AI analyst; without it the server still runs (engine/
   dashboard work), just logs "GROQ_API_KEY not set — AI analysis disabled".
 - Not reachable via the artifact preview path system since it's not an artifact; use
-  `curl localhost:8000/...` from the shell to debug, or view it via its own port directly.
+  `curl localhost:8000/...` from the shell to debug, or view it via its own port directly. The
+  generic `Screenshot` tool also can't reach it (no `artifactDirName`, and `externalUrl` rejects
+  localhost) — verify via curl/logs instead.
+
+**Dashboard WS client quirk:** each new `Client` on the server starts pinned to
+`config.DEFAULT_SYMBOL`/`DEFAULT_INTERVAL` until it receives a `subscribe` message; the frontend
+must send one right after processing the initial `config` message (not just rely on `onopen`,
+which fires before `config` arrives and the `<select>` is still empty) — otherwise a
+restored/non-default symbol shows in the dropdown while the chart/data silently stays on the
+server's default market.
