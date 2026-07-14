@@ -18,6 +18,7 @@ Pure Python — uses `requests` only, so it runs on Termux.
 """
 import json
 import os
+import re
 import threading
 import time
 import traceback
@@ -204,19 +205,47 @@ class AIAnalyst:
         self.enabled = bool(_get_api_key())
         self.last_error = None
         self.tracker = tracker
+        self._cooldown_until = 0.0   # epoch seconds; skip Groq calls until then
+        self._cooldown_reason = None
 
     def get_cached(self, symbol):
         with self._lock:
             return self._cache.get(symbol)
+
+    @staticmethod
+    def _retry_after_seconds(resp):
+        """Parse a usable backoff duration from a 429 response."""
+        header = resp.headers.get("retry-after")
+        if header:
+            try:
+                return max(1.0, float(header))
+            except ValueError:
+                pass
+        try:
+            msg = resp.json().get("error", {}).get("message", "")
+        except ValueError:
+            msg = resp.text
+        m = re.search(r"try again in ([\d.]+)s", msg, re.IGNORECASE)
+        if m:
+            try:
+                return max(1.0, float(m.group(1)))
+            except ValueError:
+                pass
+        return 30.0  # sane default when Groq doesn't tell us how long to wait
 
     # ---------------- Groq call ----------------
     def _call_groq(self, system_prompt, payload_text):
         key = _get_api_key()
         if not key:
             raise RuntimeError("GROQ_API_KEY not set")
+        now = time.time()
+        if now < self._cooldown_until:
+            wait = int(self._cooldown_until - now)
+            raise RuntimeError(f"Groq rate limited, cooling down {wait}s more ({self._cooldown_reason})")
         models = [self._model] if self._model else []
         models += [m for m in GROQ_MODELS if m and m not in models]
         last_exc = None
+        rate_limited_models = 0
         for model in models:
             try:
                 resp = requests.post(
@@ -245,11 +274,21 @@ class AIAnalyst:
                     last_exc = RuntimeError(f"{model}: {resp.status_code} {resp.text[:120]}")
                     continue
                 if resp.status_code == 429:
-                    raise RuntimeError(f"Groq rate limited: {resp.text[:120]}")
+                    # This model/org is rate limited — try the next model before
+                    # giving up, since only one model may be exhausted.
+                    rate_limited_models += 1
+                    last_exc = RuntimeError(f"{model}: rate limited: {resp.text[:120]}")
+                    self._cooldown_until = max(self._cooldown_until, time.time() + self._retry_after_seconds(resp))
+                    self._cooldown_reason = model
+                    continue
                 raise RuntimeError(f"Groq HTTP {resp.status_code}: {resp.text[:160]}")
             except requests.RequestException as e:
                 last_exc = e
                 continue
+        if rate_limited_models == len(models):
+            # Every model we tried is rate limited — respect the cooldown we
+            # just set instead of hammering Groq again next cycle.
+            raise RuntimeError(f"all Groq models rate limited: {last_exc}")
         raise RuntimeError(f"all Groq models failed: {last_exc}")
 
     @staticmethod
