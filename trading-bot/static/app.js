@@ -17,6 +17,42 @@
   var priceEl = document.getElementById("price");
   var tapeEl = document.getElementById("tape");
   var toastsEl = document.getElementById("toasts");
+  var aiStatusEl = document.getElementById("ai-status");
+  var aiStatusLabelEl = document.getElementById("ai-status-label");
+
+  // ---------- last-selected market persistence ----------
+  var LS_SYMBOL = "signalbot.symbol", LS_INTERVAL = "signalbot.interval";
+  function savedSymbol() { try { return localStorage.getItem(LS_SYMBOL); } catch (e) { return null; } }
+  function savedInterval() { try { return localStorage.getItem(LS_INTERVAL); } catch (e) { return null; } }
+  function saveMarket() {
+    try {
+      localStorage.setItem(LS_SYMBOL, symbolEl.value);
+      localStorage.setItem(LS_INTERVAL, intervalEl.value);
+    } catch (e) { /* storage unavailable — non-fatal */ }
+  }
+
+  // ---------- AI live status indicator ----------
+  var aiThinkingTimer = null;
+  function setAIEnabled(enabled) {
+    aiStatusEl.classList.toggle("enabled", !!enabled);
+    aiStatusLabelEl.textContent = enabled ? "AI LIVE" : "AI OFFLINE";
+  }
+  function pulseAIThinking(symbol) {
+    if (symbol !== symbolEl.value) return;
+    aiStatusEl.classList.add("thinking");
+    aiStatusLabelEl.textContent = "AI ANALYZING\u2026";
+    clearTimeout(aiThinkingTimer);
+    aiThinkingTimer = setTimeout(function () {
+      aiStatusEl.classList.remove("thinking");
+      aiStatusLabelEl.textContent = "AI LIVE";
+    }, 20000);
+  }
+  function ackAIResult(symbol) {
+    if (symbol !== symbolEl.value) return;
+    clearTimeout(aiThinkingTimer);
+    aiStatusEl.classList.remove("thinking");
+    aiStatusLabelEl.textContent = "AI LIVE";
+  }
 
   // ---------- charts ----------
   function baseOptions(el) {
@@ -403,6 +439,7 @@
 
   function onAI(a) {
     lastAI = a;
+    if (a && a.symbol) ackAIResult(a.symbol);
     renderAI(a);
     if (a && a.trade) onTrade(a.trade);
     if (!a || a.error || a.signal === "WAIT") return;
@@ -481,6 +518,19 @@
     });
   }
 
+  // ---------- loading state ----------
+  function showLoading() {
+    var v = document.getElementById("verdict");
+    v.className = "verdict-badge neutral";
+    v.textContent = "LOADING\u2026";
+    document.getElementById("plan-card").classList.add("hidden");
+    document.getElementById("fund-card").classList.add("hidden");
+    document.getElementById("breakdown").innerHTML = "";
+    document.getElementById("chg").textContent = "";
+    document.getElementById("gauge-score").textContent = "\u2014";
+    document.getElementById("gauge-needle").style.left = "50%";
+  }
+
   // ---------- WebSocket ----------
   var ws = null, reconnectDelay = 1000, pingTimer = null;
 
@@ -512,8 +562,19 @@
       try { m = JSON.parse(ev.data); } catch (e) { return; }
       switch (m.type) {
         case "config":
-          fillSelect(symbolEl, m.symbols, m.default_symbol);
-          fillSelect(intervalEl, m.intervals, m.default_interval);
+          var wantSymbol = savedSymbol(), wantInterval = savedInterval();
+          fillSelect(symbolEl, m.symbols, (wantSymbol && m.symbols.indexOf(wantSymbol) !== -1) ? wantSymbol : m.default_symbol);
+          fillSelect(intervalEl, m.intervals, (wantInterval && m.intervals.indexOf(wantInterval) !== -1) ? wantInterval : m.default_interval);
+          setAIEnabled(m.ai_enabled);
+          // The server tracks each client's market server-side starting at
+          // its own hard-coded default; explicitly (re)subscribe here so a
+          // restored (non-default) symbol/interval actually takes effect
+          // instead of silently showing the server's default market.
+          showLoading();
+          subscribe();
+          break;
+        case "ai_thinking":
+          pulseAIThinking(m.symbol);
           break;
         case "snapshot":
           if (m.data.symbol === symbolEl.value && m.data.interval === intervalEl.value) {
@@ -557,6 +618,7 @@
   }
 
   function reset() {
+    saveMarket();
     firstLoad = true;
     lastCandle = null;
     lastAIKey = "";
@@ -567,6 +629,10 @@
     targetPrice = null;
     priceEl.textContent = "\u2014";
     tapeEl.textContent = "";
+    showLoading();
+    clearTimeout(aiThinkingTimer);
+    aiStatusEl.classList.remove("thinking");
+    if (aiStatusEl.classList.contains("enabled")) aiStatusLabelEl.textContent = "AI LIVE";
     subscribe();
   }
   symbolEl.addEventListener("change", reset);

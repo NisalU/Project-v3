@@ -100,6 +100,7 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
             "default_symbol": config.DEFAULT_SYMBOL,
             "default_interval": config.DEFAULT_INTERVAL,
             "threshold": config.SIGNAL_THRESHOLD,
+            "ai_enabled": ai_analyst.enabled,
         })
         if config.ENGINE_SIGNAL_FEED:
             client.send({"type": "signals", "data": list(reversed(engine.signals[-50:]))})
@@ -168,6 +169,9 @@ async def _ai_loop():
             symbols.add(config.DEFAULT_SYMBOL)
             symbols.update(ai_analyst.tracker.active_symbols())
             for symbol in symbols:
+                for c in manager.clients:
+                    if c.symbol == symbol:
+                        c.send({"type": "ai_thinking", "symbol": symbol})
                 result = await asyncio.to_thread(ai_analyst.analyze_safe, symbol)
                 ai_payload = {"type": "ai", "data": result}
                 trade_payload = {"type": "trade", "data": result.get("trade")} if result.get("trade") else None

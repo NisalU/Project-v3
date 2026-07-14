@@ -52,6 +52,23 @@ html, body {
 }
 .latency { font-size: 10px; color: var(--muted); min-width: 40px; }
 
+.ai-status {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 10px; letter-spacing: 0.5px; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 20px; padding: 3px 10px 3px 6px;
+}
+.ai-status .dot { background: var(--muted); }
+.ai-status.enabled .dot { background: var(--amber); }
+.ai-status.enabled.thinking .dot {
+  background: var(--amber); box-shadow: 0 0 8px var(--amber);
+  animation: pulse-amber 1.1s ease infinite;
+}
+.ai-status.enabled #ai-status-label { color: var(--amber); }
+@keyframes pulse-amber {
+  0%, 100% { box-shadow: 0 0 3px var(--amber); }
+  50% { box-shadow: 0 0 10px var(--amber); }
+}
+
 .controls { display: flex; gap: 8px; }
 select {
   background: var(--surface); color: var(--text);

@@ -51,6 +51,6 @@ ENGINE_SIGNAL_FEED = False  # False: dashboard feed shows AI trade calls only;
 # Requires GROQ_API_KEY in the environment or a local .env file.
 AI_HTF_INTERVAL = "4h"       # higher timeframe: trend bias / EMA stack context
 AI_INTERVAL = "1h"           # decision timeframe: this is the signal that gets traded
-AI_LTF_INTERVAL = "15m"      # lower timeframe: fine order-flow entry timing
+AI_LTF_INTERVAL = "1m"       # lower timeframe: final order-flow confirmation before entry
 AI_REFRESH_SECONDS = 120     # how often the AI re-checks each active symbol
 AI_ARM_TIMEOUT_SECONDS = 6 * 3600   # drop an unfilled ARMED call after 6h

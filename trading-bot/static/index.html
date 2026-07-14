@@ -16,6 +16,10 @@
       <span class="dot" id="live-dot" aria-hidden="true"></span>
       <h1>SIGNAL<span>BOT</span></h1>
       <span class="latency" id="latency" title="WebSocket round-trip latency"></span>
+      <span class="ai-status" id="ai-status" title="AI trade analyst status">
+        <span class="dot" id="ai-dot" aria-hidden="true"></span>
+        <span id="ai-status-label">AI OFFLINE</span>
+      </span>
     </div>
     <div class="controls">
       <label class="sr-only" for="symbol">Symbol</label>
@@ -93,7 +97,7 @@
     <!-- Tracked trade lifecycle -->
     <section class="card hidden" id="trade-card">
       <div class="card-head">
-        <h2>Tracked Trade (4h bias &middot; 1h signal &middot; 15m timing)</h2>
+        <h2>Tracked Trade (4h bias &middot; 1h signal &middot; 1m confirmation)</h2>
         <span class="trade-status" id="trade-status">&mdash;</span>
       </div>
       <div class="plan-grid">

@@ -7,7 +7,7 @@ Flow per symbol:
      call and decides HOLD / TIGHTEN_STOP / CLOSE_NOW / INVALIDATED. It never
      opens a second, disconnected call while one is live.
   2. Otherwise this is a PROSPECT check: the AI does a top-down multi-
-     timeframe read (4h bias -> 1h structure -> 15m order-flow timing) and
+     timeframe read (4h bias -> 1h structure -> 1m order-flow timing) and
      either arms a new 1h trade call or says WAIT.
 
 Fills, TP1/TP2, stop hits and breakeven trailing are handled by
@@ -42,7 +42,7 @@ GROQ_MODELS = [
 PROSPECT_SYSTEM_PROMPT = """You are a professional discretionary crypto trader with 15 years of \
 screen time. You do a top-down MULTI-TIMEFRAME read exactly like a human prop-desk veteran to \
 decide whether to arm ONE new trade call on the 1h chart. You are given 4h (higher timeframe), \
-1h (decision timeframe) and 15m (fine timing) data, each with its own confluence of the 10 \
+1h (decision timeframe) and 1m (final order-flow confirmation) data, each with its own confluence of the 10 \
 strategies (trend, S/R, trendlines, patterns, fibonacci, SMC, liquidity sweeps, orderflow/CVD, \
 auction/volume-profile, fundamentals) plus an explicit EMA 7/25/99 stack.
 
@@ -54,10 +54,10 @@ fib golden zone). Confluence of 2+ levels makes the zone A-grade.
 level / order block / FVG mid that lines up with that EMA zone), in the direction of the 4h bias. \
 Never chase price that has already run away from the EMAs — if price is far from EMA7/EMA25 (see \
 price_vs_ema7_pct / price_vs_ema25_pct), wait for the pullback instead of calling a market chase.
-4. ORDER FLOW CONFIRMATION — use 1h delta/CVD for the main read and 15m delta/CVD for fine entry \
-timing. You need to see delta/CVD support or absorption AT the EMA/level zone (the pullback should \
-be slowing down/absorbing, not still trending through it). No order-flow confirmation at the level \
-= no trade.
+4. ORDER FLOW CONFIRMATION — use 1h delta/CVD for the main read and 1m delta/CVD as the FINAL \
+confirmation right before entry. You need to see delta/CVD support or absorption AT the EMA/level \
+zone (the pullback should be slowing down/absorbing, not still trending through it) on the 1m tape. \
+No 1m order-flow confirmation at the level = no trade.
 5. CONTEXT — funding, open interest, long/short positioning as contrarian filters against crowded \
 trades.
 
@@ -82,7 +82,7 @@ For WAIT, entry/stop/tp1/tp2/risk_reward may be null. Numbers must be plain (no 
 MANAGE_SYSTEM_PROMPT = """You are a professional discretionary crypto trader MANAGING a trade \
 call you already made on the 1h chart — you are not searching for a new setup. You are given the \
 existing call (its entry/stop/TP1/TP2, status and the notes logged since it was opened) plus fresh \
-4h/1h/15m data (EMA stacks, order flow, structure). Decide what to do with THIS call only:
+4h/1h/1m data (EMA stacks, order flow, structure). Decide what to do with THIS call only:
 
 - HOLD — thesis still intact; structure and order flow still support it.
 - TIGHTEN_STOP — move the stop to reduce risk (e.g. to breakeven, or under/over a fresh swing) — \
@@ -192,7 +192,7 @@ def _multi_timeframe_market(symbol):
         "symbol": symbol,
         "higher_timeframe_bias": condensed_view(htf),
         "decision_timeframe_1h": _compact_1h(signal_tf),
-        "lower_timeframe_entry_timing_15m": condensed_view(ltf),
+        "final_orderflow_confirmation_1m": condensed_view(ltf),
     }, signal_tf
 
 
