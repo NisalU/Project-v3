@@ -1,0 +1,2 @@
+- [Trading bot: standalone Python service](trading-bot-service.md) — lives at `trading-bot/`, run via `configureWorkflow` (not an artifact); reasons + how to restart.
+- [AI analyst: tracked-trade lifecycle](trading-bot-trade-lifecycle.md) — signals are stateful (ARMED→OPEN→CLOSED) via `trade_tracker.py`, not one-shot; why, and the contract to preserve.
