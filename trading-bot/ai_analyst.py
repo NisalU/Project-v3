@@ -40,6 +40,15 @@ GROQ_MODELS = [
     "llama-3.1-8b-instant",
 ]
 
+# Fallback provider when Groq is rate limited — OpenRouter's free-tier models.
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_MODELS = [
+    os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free"),
+    "deepseek/deepseek-chat-v3-0324:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+    "google/gemini-2.0-flash-exp:free",
+]
+
 PROSPECT_SYSTEM_PROMPT = """You are a professional discretionary crypto trader with 15 years of \
 screen time. You do a top-down MULTI-TIMEFRAME read exactly like a human prop-desk veteran to \
 decide whether to arm ONE new trade call on the 1h chart. You are given 4h (higher timeframe), \
@@ -100,22 +109,31 @@ Respond ONLY with a JSON object with these exact keys:
 Numbers must be plain (no strings)."""
 
 
-def _get_api_key():
-    key = os.environ.get("GROQ_API_KEY", "").strip()
+def _get_env_key(var_name):
+    key = os.environ.get(var_name, "").strip()
     if key:
         return key
     # fall back to a local .env-style file (handy on Termux)
     base = os.path.dirname(__file__)
+    prefix = f"{var_name}="
     for name in (".env", ".env.local", ".env.development.local"):
         try:
             with open(os.path.join(base, name)) as fh:
                 for line in fh:
                     line = line.strip()
-                    if line.startswith("GROQ_API_KEY="):
+                    if line.startswith(prefix):
                         return line.split("=", 1)[1].strip().strip('"').strip("'")
         except OSError:
             continue
     return ""
+
+
+def _get_api_key():
+    return _get_env_key("GROQ_API_KEY")
+
+
+def _get_openrouter_key():
+    return _get_env_key("OPENROUTER_API_KEY")
 
 
 def _fnum(x, digits=6):
@@ -202,11 +220,15 @@ class AIAnalyst:
         self._lock = threading.Lock()
         self._cache = {}          # symbol -> ai result dict
         self._model = None        # first working model, cached
-        self.enabled = bool(_get_api_key())
+        self.enabled = bool(_get_api_key() or _get_openrouter_key())
         self.last_error = None
         self.tracker = tracker
         self._cooldown_until = 0.0   # epoch seconds; skip Groq calls until then
         self._cooldown_reason = None
+        self._or_model = None
+        self._or_cooldown_until = 0.0
+        self._or_cooldown_reason = None
+        self.active_provider = None  # last provider that actually served a result
 
     def get_cached(self, symbol):
         with self._lock:
@@ -291,6 +313,83 @@ class AIAnalyst:
             raise RuntimeError(f"all Groq models rate limited: {last_exc}")
         raise RuntimeError(f"all Groq models failed: {last_exc}")
 
+    # ---------------- OpenRouter call (fallback provider) ----------------
+    def _call_openrouter(self, system_prompt, payload_text):
+        key = _get_openrouter_key()
+        if not key:
+            raise RuntimeError("OPENROUTER_API_KEY not set")
+        now = time.time()
+        if now < self._or_cooldown_until:
+            wait = int(self._or_cooldown_until - now)
+            raise RuntimeError(f"OpenRouter rate limited, cooling down {wait}s more ({self._or_cooldown_reason})")
+        models = [self._or_model] if self._or_model else []
+        models += [m for m in OPENROUTER_MODELS if m and m not in models]
+        last_exc = None
+        rate_limited_models = 0
+        for model in models:
+            try:
+                resp = requests.post(
+                    OPENROUTER_URL,
+                    headers={
+                        "Authorization": f"Bearer {key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "temperature": 0.2,
+                        "max_tokens": 600,
+                        "response_format": {"type": "json_object"},
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": payload_text},
+                        ],
+                    },
+                    timeout=45,
+                )
+                if resp.status_code == 200:
+                    self._or_model = model
+                    body = resp.json()
+                    return model, body["choices"][0]["message"]["content"]
+                if resp.status_code in (400, 404) and "model" in resp.text.lower():
+                    last_exc = RuntimeError(f"{model}: {resp.status_code} {resp.text[:120]}")
+                    continue
+                if resp.status_code == 429:
+                    rate_limited_models += 1
+                    last_exc = RuntimeError(f"{model}: rate limited: {resp.text[:120]}")
+                    self._or_cooldown_until = max(self._or_cooldown_until, time.time() + self._retry_after_seconds(resp))
+                    self._or_cooldown_reason = model
+                    continue
+                raise RuntimeError(f"OpenRouter HTTP {resp.status_code}: {resp.text[:160]}")
+            except requests.RequestException as e:
+                last_exc = e
+                continue
+        if rate_limited_models == len(models):
+            raise RuntimeError(f"all OpenRouter models rate limited: {last_exc}")
+        raise RuntimeError(f"all OpenRouter models failed: {last_exc}")
+
+    # ---------------- combined call: Groq first, OpenRouter fallback ----------------
+    def _call_llm(self, system_prompt, payload_text):
+        groq_exc = None
+        if _get_api_key():
+            try:
+                model, raw = self._call_groq(system_prompt, payload_text)
+                self.active_provider = "groq"
+                return f"groq/{model}", raw
+            except Exception as e:  # noqa: BLE001
+                groq_exc = e
+        if _get_openrouter_key():
+            try:
+                model, raw = self._call_openrouter(system_prompt, payload_text)
+                self.active_provider = "openrouter"
+                return f"openrouter/{model}", raw
+            except Exception as or_exc:  # noqa: BLE001
+                if groq_exc:
+                    raise RuntimeError(f"Groq failed ({groq_exc}); OpenRouter failed ({or_exc})")
+                raise
+        if groq_exc:
+            raise groq_exc
+        raise RuntimeError("no AI provider configured (set GROQ_API_KEY or OPENROUTER_API_KEY)")
+
     @staticmethod
     def _num(out, k):
         v = out.get(k)
@@ -307,11 +406,11 @@ class AIAnalyst:
             "15m entry timing). Do your top-down professional read and give your single best "
             "trade call as JSON:\n" + json.dumps(market, separators=(",", ":"))
         )
-        model, raw = self._call_groq(PROSPECT_SYSTEM_PROMPT, user_text)
+        model, raw = self._call_llm(PROSPECT_SYSTEM_PROMPT, user_text)
         try:
             out = json.loads(raw)
         except ValueError:
-            raise RuntimeError(f"Groq returned non-JSON: {raw[:160]}")
+            raise RuntimeError(f"{model} returned non-JSON: {raw[:160]}")
 
         signal = str(out.get("signal", "WAIT")).upper()
         if signal not in ("LONG", "SHORT", "WAIT"):
@@ -372,11 +471,11 @@ class AIAnalyst:
             "Decide HOLD / TIGHTEN_STOP / CLOSE_NOW / INVALIDATED as JSON:\n"
             + json.dumps(payload, separators=(",", ":"))
         )
-        model, raw = self._call_groq(MANAGE_SYSTEM_PROMPT, user_text)
+        model, raw = self._call_llm(MANAGE_SYSTEM_PROMPT, user_text)
         try:
             out = json.loads(raw)
         except ValueError:
-            raise RuntimeError(f"Groq returned non-JSON: {raw[:160]}")
+            raise RuntimeError(f"{model} returned non-JSON: {raw[:160]}")
 
         action = str(out.get("action", "HOLD")).upper()
         if action not in ("HOLD", "TIGHTEN_STOP", "CLOSE_NOW", "INVALIDATED"):
