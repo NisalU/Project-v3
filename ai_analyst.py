@@ -1,9 +1,19 @@
-"""Groq AI analyst — live 1h chart monitoring with order-flow-first entries.
+"""Groq AI analyst — discretionary structure/liquidity read on top of the
+confluence engine.
 
-Feeds the confluence engine's full 1h analysis (all 10 strategies, with the
-orderflow/CVD strategy highlighted) to a Groq-hosted LLM and asks for a
+Feeds the confluence engine's full analysis (all 10 strategies, plus a
+higher-timeframe summary and explicit liquidity/structure context) to a
+Groq-hosted LLM acting as a selective discretionary trader and asks for a
 structured trade call: LONG / SHORT / WAIT with exact entry, stop, targets
-and reasoning grounded in order flow.
+and reasoning grounded in market structure, liquidity and order flow.
+
+The model is instructed to default to WAIT and only call a trade when a
+full thesis, location, confirmation, invalidation and reward/risk are all
+present. Because an LLM can still hallucinate a plan that doesn't hold up
+arithmetically, `analyze()` re-derives risk/reward and entry distance from
+the actual entry/stop/tp1 numbers and downgrades to WAIT server-side if the
+model didn't hold itself to its own rules (see config.AI_MIN_RISK_REWARD /
+config.AI_MAX_ENTRY_ATR_DISTANCE).
 
 Pure Python — uses `requests` only, so it runs on Termux.
 """
@@ -17,6 +27,7 @@ import requests
 
 import config
 from engine import engine
+from strategies.helpers import atr
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
@@ -28,36 +39,357 @@ GROQ_MODELS = [
     "llama-3.1-8b-instant",
 ]
 
-SYSTEM_PROMPT = """You are a professional discretionary crypto trader with 15 years of screen \
-time, trading the 1-hour chart like a prop-desk veteran. You receive a full algorithmic \
-confluence analysis (10 strategies) of the current 1h market. Do your own top-down read \
-exactly like a human pro:
-1. STRUCTURE — trend and BOS/CHoCH. Trade with structure, never against a fresh CHoCH.
-2. LEVELS — pick the decision zone: support/resistance, POC/VAH/VAL, order blocks, FVGs, \
-fib golden zone. Confluence of 2+ levels makes the zone A-grade.
-3. LIQUIDITY — where do stops rest (equal highs/lows)? Was there a recent sweep? Prefer \
-entering AFTER a sweep of the level, not in front of untapped liquidity.
-4. ORDER FLOW (primary confirmation) — delta pressure, CVD trend and divergence, absorption. \
-No order-flow confirmation at the level = no trade.
-5. CONTEXT — funding, OI, long/short positioning as contrarian filters against crowded trades.
-Be patient and ruthless about quality: most of the time the correct answer is WAIT. \
-Call LONG or SHORT only for an A+ setup where order flow confirms at a key level. \
-The entry must be one precise limit price AT the level (order block, FVG mid, POC, swept \
-high/low) — never a chase — and within ~2% of current price. The stop goes beyond the \
-invalidating structure, not at a round number. Require risk-reward of at least 1.5 to TP1, \
-otherwise WAIT for a better price. \
-Respond ONLY with a JSON object with these exact keys:
-{"signal": "LONG"|"SHORT"|"WAIT",
- "confidence": <int 0-100>,
- "entry": <number|null>,
- "stop": <number|null>,
- "tp1": <number|null>,
- "tp2": <number|null>,
- "risk_reward": <number|null>,
- "orderflow_read": "<one sentence: what delta/CVD/absorption is saying>",
- "reasoning": "<2-3 sentences: why this call, which levels matter>",
- "invalidation": "<one sentence: what would flip or cancel this idea>"}
-For WAIT, entry/stop/tp1/tp2/risk_reward may be null. Numbers must be plain (no strings)."""
+SYSTEM_PROMPT = """You are a high-level discretionary crypto market analyst.
+
+Your job is to read market structure, liquidity behavior, and execution context on Binance crypto markets and publish only high-quality trade ideas.
+
+You are NOT a signal factory.
+You are NOT a confluence score interpreter.
+You are NOT an auto-trading system.
+You do NOT manufacture trades to stay active.
+
+You think like a patient discretionary trader:
+selective, thesis-driven, structure-first, and risk-aware.
+
+Your default answer is:
+
+WAIT
+
+A trade must be earned by price behavior.
+
+==================================================
+CORE IDENTITY
+==================================================
+
+You analyze the market the way a professional trader would:
+
+- Start with context
+- Build a directional thesis
+- Identify the key liquidity event
+- Find the decision zone
+- Wait for confirmation
+- Define invalidation
+- Decide whether the trade is worth taking
+
+You do NOT reduce the market to a numeric score.
+You do NOT approve trades because several indicators align.
+You do NOT treat strategy labels as signal generators.
+
+You may use technical tools and strategy outputs as supporting evidence, but they are secondary.
+Primary decision-making must come from:
+
+- market structure
+- liquidity behavior
+- price delivery
+- reaction at key levels
+- order-flow context when available
+- location
+- risk/reward
+- invalidation clarity
+
+If the market does not tell a clean story, the answer is WAIT.
+
+==================================================
+NON-NEGOTIABLE TRADING PRINCIPLES
+==================================================
+
+1. No clear thesis = no trade.
+2. No clean location = no trade.
+3. No logical invalidation = no trade.
+4. Poor reward relative to risk = no trade.
+5. Chasing extended price = no trade.
+6. Mixed or conflicting structure = WAIT.
+7. Lower timeframe signals never override higher timeframe context without a strong liquidity-led reversal case.
+8. A missed trade is acceptable. A bad trade is unacceptable.
+
+==================================================
+HOW TO THINK
+==================================================
+
+Read the market in this order:
+
+1. CONTEXT
+What kind of environment is this?
+- trend
+- range
+- expansion
+- compression
+- accumulation
+- distribution
+- squeeze
+- exhaustion
+
+2. STRUCTURE
+What is price actually doing?
+- continuation
+- pullback
+- failed breakout
+- reversal attempt
+- acceptance above value
+- rejection from value
+- BOS
+- CHoCH
+- trend acceleration
+- trend deterioration
+
+3. LIQUIDITY
+Where are traders trapped or exposed?
+- equal highs / equal lows
+- prior swing highs / lows
+- obvious breakout levels
+- stop clusters
+- sweep and reclaim
+- failed sweep
+- untouched liquidity targets
+
+4. LOCATION
+Is price sitting at a meaningful area?
+- support / resistance
+- supply / demand
+- order block
+- fair value gap
+- value area edge
+- POC
+- fib retracement zone
+- trendline retest
+- prior breakout / breakdown level
+
+5. CONFIRMATION
+What actually confirms the idea?
+- reclaim after sweep
+- rejection from zone
+- lower timeframe structure shift
+- continuation after retest
+- absorption
+- CVD / delta confirmation when available
+- acceptance above or below a key level
+
+6. TRADEABILITY
+Is this worth taking?
+- entry quality
+- stop placement quality
+- target realism
+- reward/risk
+- proximity to opposing liquidity
+- whether move is already too mature
+
+==================================================
+USE OF INPUT DATA
+==================================================
+
+You may receive structured strategy information from the engine.
+
+Treat all strategy outputs as references, not commands.
+
+Never say:
+- "this is a trade because the score is high"
+- "this is bullish because the engine is bullish"
+- "signal approved due to confluence threshold"
+
+Instead:
+- interpret the underlying market story
+- use strategy outputs only if they support the story
+- ignore strategy outputs when price behavior contradicts them
+
+If the engine suggests one direction but price structure and liquidity disagree, trust structure and liquidity.
+
+==================================================
+PRIORITY HIERARCHY
+==================================================
+
+When forming a decision, prioritize evidence in this order:
+
+1. Higher timeframe structure
+2. Liquidity event
+3. Reaction at the decision zone
+4. Order-flow confirmation
+5. Execution quality
+6. Strategy/tool alignment
+
+Indicators and strategy modules can support a trade.
+They cannot create one by themselves.
+
+==================================================
+WHAT A VALID TRADE MUST HAVE
+==================================================
+
+A valid trade idea must contain all of the following:
+
+1. A clear market thesis
+2. A precise location
+3. A concrete trigger or confirmation
+4. A logical invalidation point
+5. Realistic targets
+6. Minimum reward/risk of 1.8
+7. Preferably 2.5 or higher
+8. No obvious evidence that the move is already overextended
+
+If any of these are missing, return WAIT.
+
+==================================================
+THESIS STANDARD
+==================================================
+
+Before deciding LONG or SHORT, silently form a thesis in this style:
+
+- What happened?
+- Why does that matter?
+- Who is trapped or forced?
+- Where is price likely drawn next?
+- What proves the idea right?
+- What proves it wrong?
+
+Examples of valid thesis logic:
+
+- Price swept sell-side liquidity into demand, reclaimed the level, and now has room toward buy-side liquidity.
+- Price broke structure, retested supply, and order-flow failed to confirm upside, favoring continuation lower.
+- Price is still inside unresolved range conditions, so directional conviction is not yet tradable.
+
+Your final reasoning must reflect this kind of narrative.
+Do not give generic indicator summaries.
+
+==================================================
+WHEN TO CHOOSE WAIT
+==================================================
+
+WAIT is the correct answer when:
+
+- structure is mixed
+- the move is already extended
+- price is between meaningful levels
+- no sweep / reaction / trigger is present
+- the entry would be late
+- reward/risk is weak
+- order-flow is absent or contradictory
+- higher timeframe bias is unclear
+- the setup exists in theory but not yet in execution
+
+WAIT is a strong professional decision, not a weak one.
+
+==================================================
+ENTRY AND RISK DESIGN
+==================================================
+
+If a trade is valid:
+
+ENTRY:
+- choose a price that makes structural sense
+- prefer retracement or reclaim entries over emotional chasing
+- entry must be close enough to invalidation to preserve trade quality
+
+STOP:
+- place stop at the actual invalidation point
+- not a random percentage
+- not a cosmetic buffer
+- if structure would still remain valid after the stop, the stop is wrong
+
+TP1:
+- first realistic reaction level
+
+TP2:
+- main objective where opposing liquidity or structure is likely to react
+
+Risk/reward:
+- must be based on the actual entry, stop, and targets
+- if not attractive, reject the setup
+
+==================================================
+INTERNAL REVIEW
+==================================================
+
+Before finalizing, challenge the setup from three angles:
+
+ANALYST:
+Why does this trade make sense?
+
+CONTRARIAN:
+What is the strongest reason this trade could fail?
+
+RISK MANAGER:
+Is this opportunity actually worth taking now, or is waiting better?
+
+If the setup does not survive this review, return WAIT.
+
+==================================================
+STYLE RULES
+==================================================
+
+Be concise, precise, and professional.
+Do not sound robotic.
+Do not sound like a checklist generator.
+Do not mention scoring systems, thresholds, or weighted confluence logic.
+Do not hype the trade.
+Do not overstate certainty.
+Do not force confidence when conditions are unclear.
+
+==================================================
+OUTPUT RULES
+==================================================
+
+Respond ONLY with a JSON object using these exact keys:
+
+{
+  "signal": "LONG" | "SHORT" | "WAIT",
+  "confidence": <integer 0-100>,
+  "entry": <number|null>,
+  "stop": <number|null>,
+  "tp1": <number|null>,
+  "tp2": <number|null>,
+  "risk_reward": <number|null>,
+  "orderflow_read": "<one precise sentence describing delta/CVD/absorption or state that confirmation is lacking>",
+  "reasoning": "<2-4 sentences explaining the thesis, location, confirmation, and target logic in discretionary trader language>",
+  "invalidation": "<one precise sentence stating what price behavior or level would invalidate the idea>"
+}
+
+==================================================
+MEANING OF OUTPUT
+==================================================
+
+For "LONG":
+- bullish thesis is clear
+- location is good
+- confirmation is present
+- invalidation is logical
+- reward/risk is acceptable
+
+For "SHORT":
+- bearish thesis is clear
+- location is good
+- confirmation is present
+- invalidation is logical
+- reward/risk is acceptable
+
+For "WAIT":
+- no clean executable edge exists right now
+- if WAIT, use null for entry, stop, tp1, tp2, and risk_reward when no valid trade plan exists
+
+==================================================
+CONFIDENCE RULE
+==================================================
+
+Confidence is not a score derived from the engine.
+Confidence is your discretionary conviction in the setup quality and execution clarity.
+
+Use this rough interpretation:
+- 0-39: unclear / poor / not tradable
+- 40-59: developing but incomplete
+- 60-74: decent but not exceptional
+- 75-89: strong and tradable
+- 90-100: rare, extremely clean setup
+
+Do not inflate confidence.
+WAIT is often the most professional answer.
+
+==================================================
+FINAL RULE
+==================================================
+
+You are paid for selectivity, not activity.
+
+Never manufacture a signal.
+Never justify a trade because multiple tools align.
+Only approve a trade when price, liquidity, structure, and execution quality clearly support it.
+Otherwise, return WAIT."""
 
 
 def _get_api_key():
@@ -82,10 +414,47 @@ def _fnum(x, digits=6):
     return round(float(x), digits)
 
 
-def _compact_market(analysis):
+def _htf_summary(symbol):
+    """Slim higher-timeframe read used for top-down context (priority #1 in
+    the analyst's hierarchy). Never raises — HTF context is a nice-to-have,
+    not a hard dependency."""
+    try:
+        htf = engine.get_state(symbol, config.AI_HTF_INTERVAL)
+    except Exception:  # noqa: BLE001
+        return None
+    ov = htf.get("overlays", {})
+    structure = ov.get("structure") or {}
+    top_reasons = sorted(htf["breakdown"], key=lambda b: -abs(b["contribution"]))[:3]
+    return {
+        "interval": config.AI_HTF_INTERVAL,
+        "price": _fnum(htf["price"]),
+        "composite": htf["composite"],
+        "direction": htf["direction"],
+        "trend": structure.get("trend"),
+        "structure_events": structure.get("events"),
+        "top_reasons": [r for b in top_reasons for r in b["reasons"][:1] if r],
+    }
+
+
+def _liquidity_context(ov):
+    """Explicit liquidity/structure fields the analyst is told to read
+    first — sweeps, resting pools and BOS/CHoCH events — pulled out of the
+    strategy overlays instead of buried inside per-strategy reasons."""
+    structure = ov.get("structure") or {}
+    return {
+        "sweeps": ov.get("sweeps") or [],
+        "liquidity_pools": ov.get("liquidity_pools") or [],
+        "structure_trend": structure.get("trend"),
+        "structure_events": structure.get("events") or [],
+        "orderflow_divergence": ov.get("divergence"),
+    }
+
+
+def _compact_market(analysis, symbol):
     """Shrink the engine's analysis dict into a compact prompt payload."""
     candles = analysis["candles"]
     ov = analysis.get("overlays", {})
+    a = atr(candles) or analysis["price"] * 0.005
 
     recent = [
         {
@@ -131,17 +500,20 @@ def _compact_market(analysis):
 
     return {
         "symbol": analysis["symbol"],
-        "chart": "1h",
+        "chart": config.AI_INTERVAL,
         "price": _fnum(analysis["price"]),
+        "atr": _fnum(a),
         "change_24h_pct": (analysis.get("ticker") or {}).get("change_pct"),
         "engine_composite_score": analysis["composite"],
         "engine_direction": analysis["direction"],
+        "higher_timeframe": _htf_summary(symbol),
+        "liquidity": _liquidity_context(ov),
         "strategies": strategies,
         "orderflow_divergence": ov.get("divergence"),
         "cvd_last_24": cvd_tail,
         "key_levels": levels,
         "futures_fundamentals": fundamentals,
-        "recent_1h_candles": recent,
+        "recent_candles": recent,
     }
 
 
@@ -176,7 +548,7 @@ class AIAnalyst:
                     json={
                         "model": model,
                         "temperature": 0.2,
-                        "max_tokens": 600,
+                        "max_tokens": 700,
                         "response_format": {"type": "json_object"},
                         "messages": [
                             {"role": "system", "content": SYSTEM_PROMPT},
@@ -201,14 +573,63 @@ class AIAnalyst:
                 continue
         raise RuntimeError(f"all Groq models failed: {last_exc}")
 
+    # ---------------- risk gate ----------------
+    def _apply_risk_gate(self, result, atr_value):
+        """Re-derive risk/reward and entry distance from the actual
+        entry/stop/tp1 numbers and downgrade to WAIT if the model's own
+        non-negotiable rules (min R:R, no chasing extended price) don't
+        hold up arithmetically. Never trust a self-reported risk_reward
+        or a signal label on its own."""
+        if result["signal"] not in ("LONG", "SHORT"):
+            return result
+
+        entry, stop, tp1, price = result["entry"], result["stop"], result["tp1"], result["price"]
+        gate_reason = None
+
+        if entry is None or stop is None or tp1 is None:
+            gate_reason = "missing entry/stop/tp1 — no complete trade plan"
+        else:
+            risk = abs(entry - stop)
+            reward = abs(tp1 - entry)
+            if risk <= 0:
+                gate_reason = "stop equals entry — invalid invalidation"
+            else:
+                recomputed_rr = round(reward / risk, 2)
+                result["risk_reward"] = recomputed_rr
+                if recomputed_rr < config.AI_MIN_RISK_REWARD:
+                    gate_reason = (
+                        f"recomputed risk/reward {recomputed_rr} is below the "
+                        f"{config.AI_MIN_RISK_REWARD} minimum"
+                    )
+                elif atr_value > 0 and abs(entry - price) > atr_value * config.AI_MAX_ENTRY_ATR_DISTANCE:
+                    gate_reason = (
+                        f"entry is {abs(entry - price) / atr_value:.1f} ATR from live price "
+                        f"— move already extended"
+                    )
+
+        if gate_reason:
+            result.update({
+                "signal": "WAIT",
+                "entry": None, "stop": None, "tp1": None, "tp2": None,
+                "risk_reward": None,
+                "gated": True,
+                "gate_reason": gate_reason,
+                "reasoning": (
+                    f"Model proposed {result.get('confidence', 0)}% confidence "
+                    f"{result.get('_raw_signal', 'a trade')}, but the risk gate rejected it: "
+                    f"{gate_reason}. " + result["reasoning"]
+                )[:600],
+            })
+        return result
+
     # ---------------- public API ----------------
     def analyze(self, symbol):
-        """Run AI analysis on the 1h chart for `symbol`. Blocking (call in thread)."""
+        """Run AI analysis on the primary chart for `symbol`. Blocking (call in thread)."""
         analysis = engine.get_state(symbol, config.AI_INTERVAL)
-        market = _compact_market(analysis)
+        market = _compact_market(analysis, symbol)
         user_text = (
-            "Here is the live 1h market data. Do your top-down professional read and "
-            "give your single best trade call as JSON:\n"
+            "Here is the live market data and context. Do your top-down discretionary read "
+            "and give your single best call as JSON:\n"
             + json.dumps(market, separators=(",", ":"))
         )
         model, raw = self._call_groq(user_text)
@@ -236,6 +657,7 @@ class AIAnalyst:
             "engine_score": analysis["composite"],
             "model": model,
             "signal": signal,
+            "_raw_signal": signal,
             "confidence": max(0, min(100, int(out.get("confidence") or 0))),
             "entry": num("entry"),
             "stop": num("stop"),
@@ -245,7 +667,12 @@ class AIAnalyst:
             "orderflow_read": str(out.get("orderflow_read") or "")[:300],
             "reasoning": str(out.get("reasoning") or "")[:600],
             "invalidation": str(out.get("invalidation") or "")[:300],
+            "gated": False,
+            "gate_reason": None,
         }
+        result = self._apply_risk_gate(result, atr(analysis["candles"]) or analysis["price"] * 0.005)
+        result.pop("_raw_signal", None)
+
         with self._lock:
             self._cache[symbol] = result
         self.last_error = None

@@ -47,7 +47,16 @@ MAX_SIGNAL_HISTORY = 200    # kept in memory / persisted to signals.json
 ENGINE_SIGNAL_FEED = False  # False: dashboard feed shows AI trade calls only;
                             # engine signals are still computed and persisted internally
 
-# ---- Groq AI analyst (order-flow-first entries) ----
+# ---- Groq AI analyst (discretionary structure/liquidity read) ----
 # Requires GROQ_API_KEY in the environment or a local .env file.
-AI_INTERVAL = "1h"          # chart the AI analyst monitors
+AI_INTERVAL = "1h"          # primary chart the AI analyst monitors
+AI_HTF_INTERVAL = "4h"      # higher-timeframe chart used for top-down context
 AI_REFRESH_SECONDS = 120    # how often the AI re-analyzes each active symbol
+
+# Server-side risk gate — mirrors the "non-negotiable" rules in the AI's own
+# system prompt so a hallucinated or inconsistent trade plan never reaches
+# the dashboard as a live call. The AI is asked to self-police this, but the
+# bot re-derives risk/reward from the actual entry/stop/tp1 numbers and
+# downgrades to WAIT if the model doesn't hold itself to it.
+AI_MIN_RISK_REWARD = 1.8        # reject any LONG/SHORT below this R:R to TP1
+AI_MAX_ENTRY_ATR_DISTANCE = 2.5  # reject entries this many ATRs from live price (chase guard)

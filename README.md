@@ -64,9 +64,38 @@ Signal history persists to `signals.json`.
 > automatically falls back to `data-api.binance.vision` for market data.
 > Futures fundamentals (funding/OI) are skipped gracefully when unavailable.
 
+## AI analysis layer (Groq)
+
+On top of the 10-strategy confluence engine, `ai_analyst.py` runs a Groq-hosted
+LLM acting as a **selective discretionary trader**, not a signal generator.
+
+- It receives the full 1h confluence read, an explicit liquidity/structure
+  summary (sweeps, resting liquidity pools, BOS/CHoCH events, CVD
+  divergence), and a 4h higher-timeframe summary for top-down context.
+- Its default answer is **WAIT**. It only calls LONG/SHORT when it can state a
+  thesis, a clean location, a concrete confirmation, a logical invalidation,
+  and a reward/risk of at least 1.8 — never because the engine's composite
+  score or individual strategies line up.
+- The bot does not just trust the model's own arithmetic: `analyze()`
+  re-derives risk/reward from the actual entry/stop/tp1 numbers and checks
+  entry distance in ATRs, and downgrades the call to WAIT server-side (a
+  `gated: true` flag with `gate_reason`) if the model's own plan doesn't hold
+  up. This mirrors the analyst's own non-negotiable rules as a backstop
+  against hallucinated setups.
+- Setup: set `GROQ_API_KEY` in the environment (or a local `.env` file next
+  to `server.py` — handy on Termux). Without it the AI layer is disabled and
+  the dashboard falls back to the raw engine signals.
+- Tunables in `config.py`: `AI_INTERVAL` / `AI_HTF_INTERVAL` (chart + HTF
+  context), `AI_REFRESH_SECONDS` (poll cadence), `AI_MIN_RISK_REWARD` and
+  `AI_MAX_ENTRY_ATR_DISTANCE` (the server-side risk gate thresholds), and
+  `GROQ_MODEL` env var to override the default model
+  (`llama-3.3-70b-versatile`, with automatic fallback to other Groq models).
+- `GET /api/ai?symbol=BTCUSDT` returns the latest cached call; the dashboard
+  also receives live `{"type":"ai", ...}` pushes over the websocket.
+
 ## Disclaimer
 
 Educational tool — not financial advice. Signals are algorithmic confluence
-scores, not guarantees.
+scores and discretionary AI reads, not guarantees.
 # New-project
 # Project-v3
