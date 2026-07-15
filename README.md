@@ -64,34 +64,120 @@ Signal history persists to `signals.json`.
 > automatically falls back to `data-api.binance.vision` for market data.
 > Futures fundamentals (funding/OI) are skipped gracefully when unavailable.
 
-## AI analysis layer (Groq)
+## AI market intelligence pipeline (Groq)
 
-On top of the 10-strategy confluence engine, `ai_analyst.py` runs a Groq-hosted
-LLM acting as a **selective discretionary trader**, not a signal generator.
+`ai_analyst.py` is not a single model call — it's a pipeline that only lets a
+trade idea through if every stage agrees it's worth publishing:
 
-- It receives the full 1h confluence read, an explicit liquidity/structure
-  summary (sweeps, resting liquidity pools, BOS/CHoCH events, CVD
-  divergence), and a 4h higher-timeframe summary for top-down context.
-- Its default answer is **WAIT**. It only calls LONG/SHORT when it can state a
-  thesis, a clean location, a concrete confirmation, a logical invalidation,
-  and a reward/risk of at least 1.8 — never because the engine's composite
-  score or individual strategies line up.
-- The bot does not just trust the model's own arithmetic: `analyze()`
-  re-derives risk/reward from the actual entry/stop/tp1 numbers and checks
-  entry distance in ATRs, and downgrades the call to WAIT server-side (a
-  `gated: true` flag with `gate_reason`) if the model's own plan doesn't hold
-  up. This mirrors the analyst's own non-negotiable rules as a backstop
-  against hallucinated setups.
-- Setup: set `GROQ_API_KEY` in the environment (or a local `.env` file next
-  to `server.py` — handy on Termux). Without it the AI layer is disabled and
-  the dashboard falls back to the raw engine signals.
-- Tunables in `config.py`: `AI_INTERVAL` / `AI_HTF_INTERVAL` (chart + HTF
-  context), `AI_REFRESH_SECONDS` (poll cadence), `AI_MIN_RISK_REWARD` and
-  `AI_MAX_ENTRY_ATR_DISTANCE` (the server-side risk gate thresholds), and
-  `GROQ_MODEL` env var to override the default model
-  (`llama-3.3-70b-versatile`, with automatic fallback to other Groq models).
-- `GET /api/ai?symbol=BTCUSDT` returns the latest cached call; the dashboard
-  also receives live `{"type":"ai", ...}` pushes over the websocket.
+```
+Market data (engine.py, all 10 strategies)
+    -> Market regime filter (market_regime.py)      -- skip AI in chop/spikes
+    -> Structural trade-quality pre-check (trade_quality.py)
+    -> Signal memory context (signal_memory.py)      -- past similar setups
+    -> Primary AI analyst (Groq)                     -- forms the thesis
+    -> Server-side risk gate                         -- re-checks the math
+    -> Final trade-quality grade on the actual plan
+    -> AI critic (Groq, second opinion)              -- tries to kill it
+    -> Signal memory write
+```
+
+Every stage after the primary analyst can only make the call **more**
+conservative (push it toward WAIT) — none of them can invent or upgrade a
+signal. The system is tuned to prefer no trade over a low-quality one.
+
+**1. Market regime filter** (`market_regime.py`) — classifies the market as
+`trending_bullish` / `trending_bearish` / `range` / `accumulation` /
+`distribution` / `high_volatility` / `mixed` using the engine's own SMC trend
+and composite score, plus range-compression and volatility-expansion ratios
+computed from the same candles (no extra network calls). When it flags the
+market as non-tradeable, **the Groq call is skipped entirely** and the result
+is WAIT with the regime's reasons — this is what keeps AI usage down during
+poor conditions instead of just generating more WAIT calls from the model.
+
+**2. Trade quality engine** (`trade_quality.py`) — grades a setup **A+ / A /
+B / Reject** instead of a blended confluence number. Location, structure,
+liquidity, order-flow and risk are rated independently (e.g. location asks
+"is price actually at an order block / FVG / S-R level?", not "what's the
+score?"). It runs once before the AI call (structural context) and again on
+the AI's actual entry/stop/tp1 to decide whether the call is good enough to
+publish (`config.AI_MIN_TRADE_GRADE`, default `B`).
+
+**3. Signal memory** (`signal_memory.py`) — a local SQLite log
+(`signal_history.db`, gitignored) of every published call: symbol,
+timestamp, setup type, entry/stop/target, market condition, quality grade
+and the AI's own reasoning. The last few setups on the same symbol are fed
+back into the AI's context window and turned into an explicit risk warning
+if recent similar trades lost.
+
+**4. Primary AI analyst** — receives the full 1h confluence read, an
+explicit liquidity/structure summary (sweeps, resting liquidity pools,
+BOS/CHoCH events, CVD divergence), a 4h higher-timeframe summary, the regime
+classification, the structural quality grade, recent similar setups and any
+risk warnings. Its default answer is **WAIT**; it only calls LONG/SHORT with
+a thesis, a clean location, a concrete confirmation, a logical invalidation,
+and a reward/risk of at least 1.8.
+
+**5. Server-side risk gate** — never trusts the model's self-reported
+numbers. It re-derives risk/reward and entry-to-price distance from the
+actual entry/stop/tp1, and additionally rejects the call if the stop sits on
+a resting liquidity pool (stop-hunt risk), an opposing support/resistance
+level sits between entry and tp1 (unrealistic target), or the regime is
+flagged high-volatility. Any rejection sets `gated: true` with a
+human-readable `gate_reason` and forces `signal: "WAIT"`.
+
+**6. AI critic** (`config.AI_CRITIC_ENABLED`, default on) — a second,
+independent Groq call that is instructed to be skeptical by default and try
+to kill the trade: is the entry late, is there liquidity/structure against
+it before target, is the reward/risk realistic given the real price
+distances, could this be a trap, does the higher timeframe disagree. If it
+doesn't approve, the call is forced to WAIT with the critic's critique
+attached (`result.critic`).
+
+### Setup
+
+Set `GROQ_API_KEY` in the environment (or a local `.env` file next to
+`server.py` — handy on Termux). Without it the AI layer is disabled and the
+dashboard falls back to the raw engine signals. `GROQ_MODEL` overrides the
+default model (`llama-3.3-70b-versatile`, with automatic fallback to other
+Groq models on rate limits/outages).
+
+### Tunables (`config.py`)
+
+- `AI_INTERVAL` / `AI_HTF_INTERVAL` — primary chart + higher-timeframe context
+- `AI_REFRESH_SECONDS` — poll cadence per active symbol
+- `REGIME_COMPRESSION_TIGHT` / `REGIME_VOLATILITY_SPIKE` — regime filter thresholds
+- `AI_MIN_RISK_REWARD` / `AI_MAX_ENTRY_ATR_DISTANCE` — risk gate thresholds
+- `AI_MIN_TRADE_GRADE` — minimum trade-quality grade required to publish
+- `AI_CRITIC_ENABLED` — toggle the second-pass critic review
+- `SIGNAL_MEMORY_LOOKBACK` — how many past setups are shown to the AI
+
+### Output
+
+`GET /api/ai?symbol=BTCUSDT` returns the latest cached call; the dashboard
+also receives live `{"type":"ai", ...}` pushes over the websocket. Result
+shape:
+
+```json
+{
+  "signal": "LONG | SHORT | WAIT",
+  "direction": "LONG | SHORT | null",
+  "setup_type": "e.g. liquidity sweep + reclaim",
+  "confidence": 0,
+  "entry": null, "stop": null, "tp1": null, "tp2": null,
+  "risk_reward": null,
+  "market_regime": "trending_bullish | range | ...",
+  "htf_bias": "LONG | SHORT | NEUTRAL",
+  "liquidity_context": { "sweeps": [], "liquidity_pools": [], "...": "..." },
+  "orderflow_read": "...",
+  "reasoning": "...",
+  "invalidation": "...",
+  "trade_quality": { "grade": "A+ | A | B | Reject", "...": "..." },
+  "gated": false,
+  "gate_reason": null,
+  "critic": { "approve": true, "concerns": [], "critique": "..." },
+  "regime_blocked": false
+}
+```
 
 ## Disclaimer
 

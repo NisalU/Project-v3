@@ -19,3 +19,4 @@ __pycache__/
 *.pyc
 .venv/
 signals.json
+signal_history.db

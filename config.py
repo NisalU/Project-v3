@@ -60,3 +60,25 @@ AI_REFRESH_SECONDS = 120    # how often the AI re-analyzes each active symbol
 # downgrades to WAIT if the model doesn't hold itself to it.
 AI_MIN_RISK_REWARD = 1.8        # reject any LONG/SHORT below this R:R to TP1
 AI_MAX_ENTRY_ATR_DISTANCE = 2.5  # reject entries this many ATRs from live price (chase guard)
+
+# ---- Market regime filter ----
+# Cheap pre-check that runs before every AI/critic call. Poor-condition
+# markets (chop, extreme volatility spikes, dead range) skip the AI call
+# entirely and resolve to WAIT locally — this is what "reduce AI calls
+# during poor conditions" means: fewer Groq requests, not just more WAITs.
+REGIME_COMPRESSION_TIGHT = 0.45  # 20-candle range below this x ATR = compressed/range
+REGIME_VOLATILITY_SPIKE = 1.8    # recent/baseline true-range ratio above this = high volatility
+
+# ---- AI critic (second-pass review) ----
+# A second, independent Groq call that challenges the primary call before
+# anything is published. If it doesn't sign off, the signal is forced WAIT
+# regardless of what the primary analyst said.
+AI_CRITIC_ENABLED = True
+
+# ---- Trade quality gate ----
+# Minimum grade (from trade_quality.py) required to publish a LONG/SHORT.
+# Grades below this are forced to WAIT even if the AI and critic agree.
+AI_MIN_TRADE_GRADE = "B"   # one of: "A+", "A", "B" (Reject is never published)
+
+# ---- Signal memory ----
+SIGNAL_MEMORY_LOOKBACK = 3  # past setups (same symbol) shown to the AI as context
